@@ -745,3 +745,95 @@ This panel is a **relative** measure (index units) to show directionally how rev
 """)
 
 st.caption("© Demo app for interview practice. Uses Kaggle Store Sales dataset (Corporación Favorita).")
+
+
+
+# --- Hybrid model (ETS + LightGBM residuals) ---
+import numpy as np, pandas as pd
+from pandas.tseries.frequencies import to_offset
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+try:
+    import lightgbm as lgb
+except Exception:
+    lgb = None
+
+SEASONAL_M_DEFAULT = 12
+
+def _build_lagged(s: pd.Series, lags=(1,2,3,6,12), m_windows=(3,6,12)):
+    df = pd.DataFrame({"y": s})
+    for L in lags:
+        df[f"lag_{L}"] = s.shift(L)
+    for w in m_windows:
+        df[f"roll_mean_{w}"] = s.shift(1).rolling(w).mean()
+    df["month"] = df.index.month
+    df["dow"] = df.index.dayofweek
+    return df
+
+def fit_hybrid_ets_lgbm(train: pd.Series, exog: pd.DataFrame=None, freq: str="MS", seasonal_m: int=None):
+    seasonal_m = seasonal_m or (12 if freq.upper().startswith("M") else (52 if freq.upper().startswith("W") else 7))
+    seasonal = "add" if seasonal_m >= 4 else None
+    ets = ExponentialSmoothing(train, trend="add", seasonal=seasonal,
+                               seasonal_periods=seasonal_m, initialization_method="estimated").fit(optimized=True)
+    resid = (train - pd.Series(ets.fittedvalues, index=train.index)).dropna()
+    if lgb is None:
+        raise RuntimeError("LightGBM not installed")
+    frame = _build_lagged(resid).join(exog or pd.DataFrame(index=resid.index), how="left").dropna()
+    X, y = frame.drop(columns=["y"]), frame["y"]
+    lgbm = lgb.LGBMRegressor(random_state=42, n_estimators=500, learning_rate=0.05)
+    lgbm.fit(X, y)
+    return {"ets": ets, "lgbm": lgbm, "cols": X.columns, "freq": freq, "seasonal_m": seasonal_m}
+
+def forecast_hybrid(model_dict, history: pd.Series, exog_future: pd.DataFrame, steps: int):
+    ets, lgbm, cols, freq = model_dict["ets"], model_dict["lgbm"], model_dict["cols"], model_dict["freq"]
+    base_fc = ets.forecast(steps)
+    resid_hist = (history - pd.Series(ets.fittedvalues, index=history.index)).dropna()
+    hist = resid_hist.copy()
+    preds = []
+    for _ in range(steps):
+        frame = _build_lagged(hist).join(exog_future, how="left")
+        X = frame.drop(columns=["y"]).iloc[[-1]].reindex(columns=cols, fill_value=np.nan)
+        yhat = float(lgbm.predict(X)[0])
+        next_idx = hist.index[-1] + to_offset(freq)
+        hist.loc[next_idx] = yhat
+        preds.append(yhat)
+    resid_fc = pd.Series(preds, index=base_fc.index)
+    return (base_fc + resid_fc).clip(lower=0)
+
+def plot_hybrid_diagnostics(history: pd.Series, fc: pd.Series, ets_model, resid_hist: pd.Series, out_dir: str):
+    import matplotlib.pyplot as plt
+    from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Forecast plot
+    plt.figure(figsize=(10,4))
+    plt.plot(history.index, history.values, label="Actual")
+    plt.plot(fc.index, fc.values, label="Hybrid forecast")
+    plt.title("Hybrid forecast (ETS + LGBM residuals)"); plt.legend(); plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "hybrid_forecast.png")); plt.close()
+
+    # ETS fitted
+    plt.figure(figsize=(10,3))
+    plt.plot(pd.Series(ets_model.fittedvalues, index=history.index), label="ETS fitted")
+    plt.title("ETS fitted values"); plt.legend(); plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "ets_fitted.png")); plt.close()
+
+    # Residual diagnostics
+    fig, axs = plt.subplots(1,3, figsize=(13,3))
+    axs[0].hist(resid_hist, bins=30); axs[0].set_title("Residual histogram")
+    plot_acf(resid_hist, ax=axs[1], lags=min(40, len(resid_hist)//2)); axs[1].set_title("Residual ACF")
+    plot_pacf(resid_hist, ax=axs[2], lags=min(40, len(resid_hist)//2)); axs[2].set_title("Residual PACF")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "residual_diagnostics.png")); plt.close()
+
+def plot_lgbm_importance(model_dict, out_dir: str):
+    import matplotlib.pyplot as plt, os, numpy as np
+    os.makedirs(out_dir, exist_ok=True)
+    lgbm, cols = model_dict["lgbm"], model_dict["cols"]
+    imps = lgbm.feature_importances_
+    order = np.argsort(imps)[::-1][:15]
+    plt.figure(figsize=(8,6))
+    plt.barh(np.array(cols)[order][::-1], imps[order][::-1])
+    plt.title("LightGBM feature importance"); plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "lgbm_feature_importance.png")); plt.close()

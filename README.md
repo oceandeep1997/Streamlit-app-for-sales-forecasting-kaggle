@@ -1,4 +1,4 @@
-# AI-Driven Sales Forecasting (Corporación Favorita – Kaggle)
+# AI-Driven Sales Forecasting (Kaggle)
 **Streamlit dashboard — User Guide / README**
 
 This README explains how to install, run, and make the most of the sales‑forecasting dashboard built on top of the Kaggle *Store Sales – Time Series Forecasting* dataset. It clarifies dataset fields (what “store” and “family” mean), how each chart and index is computed, what every model does, how validation works, and how to interpret scenario analysis (promo uplift, price change, elasticity) and the **Revenue Index**.
@@ -30,7 +30,7 @@ pip install streamlit pandas numpy plotly statsmodels scikit-learn lightgbm prop
 ### Files expected
 Place this structure in one folder:
 ```
-├── galderma_sales_forecast_streamlit_app.py
+├── multiple_models.py
 └── store-sales-time-series-forecasting.zip
 ```
 The ZIP must contain (Kaggle originals):
